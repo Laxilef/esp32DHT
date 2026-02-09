@@ -31,6 +31,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 Ticker ticker;
 DHT22 sensor;
 // DHT11 sensor;  // DHT11 also works!
+DHT::Status prevStatus = DHT::Status::NONE;
 
 void readDHT() {
   sensor.read();
@@ -38,15 +39,20 @@ void readDHT() {
 
 void setup() {
   Serial.begin(74880);
-  sensor.setup(23);  // pin 23 is DATA, RMT channel defaults to channel 0 and 1
+  sensor.setup(12); // pin 23 is DATA
   sensor.onData([](float humidity, float temperature) {
-    Serial.printf("Temp: %g°C\nHumid: %g%%\n", temperature, humidity);
+    Serial.printf("[%lu] Temp: %g°C\nHumid: %g%%\n", millis(), temperature, humidity);
   });
-  sensor.onError([](uint8_t error) {
-    Serial.printf("Sensor error: %s", sensor.getError());
+  sensor.onError([](DHT::Status status) {
+    Serial.printf("[%lu] Sensor error: %s\n", millis(), DHT::statusToString(status));
   });
   ticker.attach(30, readDHT);
 }
 
 void loop() {
+  auto currentStatus = sensor.getStatus();
+  if (currentStatus != prevStatus) {
+    Serial.printf("[%lu] Status '%s' => '%s'\n", millis(), DHT::statusToString(prevStatus), DHT::statusToString(currentStatus));
+    prevStatus = currentStatus;
+  }
 }

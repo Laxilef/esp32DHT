@@ -27,57 +27,72 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 extern "C" {
   #include <freertos/FreeRTOS.h>
   #include <freertos/task.h>
+  #include <freertos/queue.h>
   #include <esp32-hal-gpio.h>
-  #include <driver/rmt.h>
+  #include <driver/rmt_rx.h>
   #include <esp_timer.h>
 }
 #include <functional>
 
-namespace esp32DHTInternals {
-
-typedef std::function<void(float humid, float temp)> OnData_CB;
-typedef std::function<void(uint8_t error)> OnError_CB;
-
-}  // end namespace esp32DHTInternals
-
 class DHT {
  public:
+  enum class Status {
+    NONE,
+    WAITING,
+    REQUESTING,
+    RECEIVING,
+    RECEIVED,
+    TIMEOUT,
+    BAD_DATA,
+    BAD_CHECKSUM,
+    UNDERFLOW_DATA,
+    OVERFLOW_DATA,
+    NACK,
+    FAIL_ON_DRIVER
+  };
+  typedef std::function<void(float humidity, float temperature)> DataCallback;
+  typedef std::function<void(Status status)> ErrorCallback;
+
   DHT();
   ~DHT();
-  void setup(uint8_t pin, rmt_channel_t channel = RMT_CHANNEL_0);  // setPin does complete setup of DHT lib
-  void onData(esp32DHTInternals::OnData_CB callback);
-  void onError(esp32DHTInternals::OnError_CB callback);
+  void end();
+  bool setup(uint8_t pin);
+  void onData(DataCallback callback);
+  void onError(ErrorCallback callback);
   void read();
-  const char* getError() const;
+  Status getStatus() const;
+  static const char* statusToString(const Status status);
 
  protected:
-  uint8_t _status;
+  Status _status;
   uint8_t _data[5];
 
  private:
   static void _readSensor(DHT* instance);
-  void _decode(rmt_item32_t* data, int numItems);
+  static bool _onRxDone(rmt_channel_handle_t, const rmt_rx_done_event_data_t*, void*);
+  void _decode(const rmt_symbol_word_t* data, const size_t numItems);
   void _tryCallback();
   virtual float _getTemperature() = 0;
   virtual float _getHumidity() = 0;
 
  private:
   uint8_t _pin;
-  rmt_channel_t _channel;
-  esp32DHTInternals::OnData_CB _onData;
-  esp32DHTInternals::OnError_CB _onError;
+  rmt_channel_handle_t _channel;
+  DataCallback _onData;
+  ErrorCallback _onError;
   TaskHandle_t _task;
-  RingbufHandle_t _ringBuf;
+  rmt_symbol_word_t _raw[128];
+  QueueHandle_t _queue;
 };
 
 class DHT11 : public DHT {
  private:
-  float _getTemperature();
-  float _getHumidity();
+  float _getTemperature() override;
+  float _getHumidity() override;
 };
 
 class DHT22 : public DHT {
  private:
-  float _getTemperature();
-  float _getHumidity();
+  float _getTemperature() override;
+  float _getHumidity() override;
 };

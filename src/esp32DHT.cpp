@@ -24,47 +24,82 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "esp32DHT.hpp"  // NOLINT
 
-#define RMT_CLK_DIV 80
-
 DHT::DHT() :
-  _status(0),
+  _status(DHT::Status::NONE),
   _data{0},
   _pin(0),
-  _channel(RMT_CHANNEL_0),
+  _channel(nullptr),
   _onData(nullptr),
   _onError(nullptr),
-  _task(nullptr) {}
+  _task(nullptr),
+  _queue(nullptr) {}
 
 DHT::~DHT() {
-  rmt_driver_uninstall(_channel);
-  vTaskDelete(_task);
+  end();
 }
 
-void DHT::setup(uint8_t pin, rmt_channel_t channel) {
+void DHT::end() {
+  if (_channel != nullptr) {
+    rmt_disable(_channel);
+    rmt_del_channel(_channel);
+    _channel = nullptr;
+  }
+
+  if (_task != nullptr) {
+    vTaskDelete(_task);
+    _task = nullptr;
+  }
+
+  if (_queue != nullptr) {
+    vQueueDelete(_queue);
+    _queue = nullptr;
+  }
+
+  _status = Status::NONE;
+}
+
+bool DHT::setup(uint8_t pin) {
   _pin = pin;
-  _channel = channel;
-  rmt_config_t config{};
-  config.rmt_mode = RMT_MODE_RX;
-  config.channel = _channel;
-  config.gpio_num = static_cast<gpio_num_t>(_pin);
-  config.mem_block_num = 2;
-  config.rx_config.filter_en = 1;
-  config.rx_config.filter_ticks_thresh = 10;
-  config.rx_config.idle_threshold = 1000;
-  config.clk_div = RMT_CLK_DIV;
-  rmt_config(&config);
-  rmt_driver_install(_channel, 400, 0);  // 400 words for ringbuffer containing pulse trains from DHT
-  rmt_get_ringbuf_handle(_channel, &_ringBuf);
-  xTaskCreate((TaskFunction_t)&_readSensor, "esp32DHT", 2048, this, 5, &_task);
+  rmt_rx_channel_config_t rx_conf = {
+    .gpio_num = static_cast<gpio_num_t>(_pin),
+    .clk_src = RMT_CLK_SRC_DEFAULT,
+    .resolution_hz = 1000000,
+    .mem_block_symbols = 128
+  };
+
+  if (rmt_new_rx_channel(&rx_conf, &_channel) != ESP_OK) {
+    _status = Status::FAIL_ON_DRIVER;
+    return false;
+  }
+
+  if (rmt_enable(_channel) != ESP_OK) {
+    rmt_del_channel(_channel);
+    _status = Status::FAIL_ON_DRIVER;
+    return false;
+  }
+
+  rmt_rx_event_callbacks_t cbs = {
+    .on_recv_done = _onRxDone
+  };
+  if (rmt_rx_register_event_callbacks(_channel, &cbs, this) != ESP_OK) {
+    rmt_disable(_channel);
+    rmt_del_channel(_channel);
+    _status = Status::FAIL_ON_DRIVER;
+    return false;
+  }
+  
+  _queue = xQueueCreate(1, sizeof(rmt_rx_done_event_data_t));
+  xTaskCreate((TaskFunction_t)&_readSensor, "esp32DHT", 3072, this, 5, &_task);
+
   pinMode(_pin, OUTPUT);
   digitalWrite(_pin, HIGH);
 }
 
-void DHT::onData(esp32DHTInternals::OnData_CB callback) {
+void DHT::onData(DHT::DataCallback callback) {
   _onData = callback;
 }
 
-void DHT::onError(esp32DHTInternals::OnError_CB callback) {
+void DHT::onError(DHT::ErrorCallback callback) {
   _onError = callback;
 }
 
@@ -72,57 +107,101 @@ void DHT::read() {
   xTaskNotifyGive(_task);
 }
 
-const char* DHT::getError() const {
-  if (_status == 0) {
-    return "OK";
-  } else if (_status == 1) {
-    return "TO";
-  } else if (_status == 2) {
-    return "NACK";
-  } else if (_status == 3) {
-    return "DATA";
-  } else if (_status == 4) {
-    return "CS";
-  } else if (_status == 5) {
-    return "UNDERFLOW";
-  } else if (_status == 6) {
-    return "OVERFLOW";
+DHT::Status DHT::getStatus() const {
+  return _status;
+}
+
+const char* DHT::statusToString(const Status status) {
+  switch (status) {
+    case Status::NONE:
+      return "NONE";
+      break;
+
+    case Status::WAITING:
+      return "WAITING";
+      break;
+
+    case Status::REQUESTING:
+      return "REQUESTING";
+      break;
+
+    case Status::RECEIVING:
+      return "RECEIVING";
+      break;
+
+    case Status::RECEIVED:
+      return "RECEIVED";
+      break;
+
+    case Status::TIMEOUT:
+      return "TIMEOUT";
+      break;
+
+    case Status::BAD_DATA:
+      return "BAD_DATA";
+      break;
+
+    case Status::BAD_CHECKSUM:
+      return "BAD_CHECKSUM";
+      break;
+
+    case Status::UNDERFLOW_DATA:
+      return "UNDERFLOW_DATA";
+      break;
+
+    case Status::OVERFLOW_DATA:
+      return "OVERFLOW_DATA";
+      break;
+
+    case Status::NACK:
+      return "NACK";
+      break;
+
+    case Status::FAIL_ON_DRIVER:
+      return "FAIL_ON_DRIVER";
+      break;
+
+    default:
+      return "UNKNOWN";
+      break;
   }
-  return "UNKNOWN";
 }
 
 void DHT::_readSensor(DHT* instance) {
-  size_t rx_size = 0;
   while (1) {
     // reset
-    instance->_data[0] =
-    instance->_data[1] =
-    instance->_data[2] =
-    instance->_data[3] =
-    instance->_data[4] = 0;
-    instance->_status = 0;
+    memset(instance->_data, 0, sizeof(instance->_data));
+    instance->_status = Status::WAITING;
 
     // block and wait for notification
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
+    // set status
+    instance->_status = Status::REQUESTING;
+
     // give start signal to sensor
     digitalWrite(instance->_pin, LOW);
-    vTaskDelay(18);
+    vTaskDelay(18 / portTICK_PERIOD_MS);
     pinMode(instance->_pin, INPUT);
-    rmt_rx_start(instance->_channel, 1);
-    // rmt_set_pin is used untill platformio updates to latest Arduino core.
-    // rmt_set_gpio(instance->_channel, RMT_MODE_RX, static_cast<gpio_num_t>(instance->_pin), false);  // reset after using pin as output
-    rmt_set_pin(instance->_channel, RMT_MODE_RX, static_cast<gpio_num_t>(instance->_pin));  // reset after using pin as output
 
-    // blocks until data is available or timeouts after 1000
-    rmt_item32_t* items = static_cast<rmt_item32_t*>(xRingbufferReceive(instance->_ringBuf, &rx_size, 1000));
-    if (items) {
-      instance->_decode(items, rx_size/sizeof(rmt_item32_t));
-      vRingbufferReturnItem(instance->_ringBuf, static_cast<void*>(items));
+    // set status
+    instance->_status = Status::RECEIVING;
+
+    rmt_receive_config_t rx_config = {
+      .signal_range_min_ns = 3000,
+      .signal_range_max_ns = 1000000,
+    };
+    rmt_receive(instance->_channel, instance->_raw, sizeof(instance->_raw), &rx_config);
+
+    // blocks until data is available or timeouts after 1s
+    rmt_rx_done_event_data_t eData = {};
+    if (xQueueReceive(instance->_queue, &eData, 1000 / portTICK_PERIOD_MS) == pdTRUE) {
+      instance->_decode(eData.received_symbols, eData.num_symbols);
+
     } else {
-      instance->_status = 1;  // timeout error
+      instance->_status = Status::TIMEOUT;
     }
-    rmt_rx_stop(instance->_channel);
+
     pinMode(instance->_pin, OUTPUT);
     digitalWrite(instance->_pin, HIGH);
 
@@ -131,63 +210,86 @@ void DHT::_readSensor(DHT* instance) {
   }
 }
 
-void DHT::_decode(rmt_item32_t* data, int numItems) {
+bool IRAM_ATTR DHT::_onRxDone(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *eData, void *uCtx) {
+  BaseType_t wakeup = pdFALSE;
+  DHT* instance = static_cast<DHT*>(uCtx);
+  xQueueSendFromISR(instance->_queue, eData, &wakeup);
+  return (wakeup == pdTRUE);
+}
+
+void DHT::_decode(const rmt_symbol_word_t* data, const size_t numItems) {
   uint8_t pulse = data[0].duration0 + data[0].duration1;
+
   if (numItems < 41) {
-    _status = 5;
+    _status = Status::UNDERFLOW_DATA;
+
   } else if (numItems > 42) {
-    _status = 6;
+    _status = Status::OVERFLOW_DATA;
+
   } else if (pulse < 130 || pulse > 180) {
-    _status = 2;
+    _status = Status::NACK;
+
   } else {
     for (uint8_t i = 1; i < 41; ++i) {  // don't include tail >40
       pulse = data[i].duration0 + data[i].duration1;
+
       if (pulse > 55 && pulse < 145) {
         _data[(i - 1) / 8] <<= 1;  // shift left
         if (pulse > 110) {
           _data[(i - 1) / 8] |= 1;
         }
+
       } else {
-        _status = 3;  // DATA error
+        _status = Status::BAD_DATA;
         return;
       }
     }
+
     if (_data[4] == ((_data[0] + _data[1] + _data[2] + _data[3]) & 0xFF)) {
-      _status = 0;
+      _status = Status::RECEIVED;
+
     } else {
-      _status = 4;  // checksum error
+      _status = Status::BAD_CHECKSUM;
     }
   }
 }
 
 void DHT::_tryCallback() {
-  if (_status == 0) {
-    if (_onData) _onData(_getHumidity(), _getTemperature());
-  } else {
-    if (_onError) _onError(_status);
+  if (_status == Status::RECEIVED && _onData) {
+    _onData(_getHumidity(), _getTemperature());
+
+  } else if (_status != Status::RECEIVED && _onError) {
+    _onError(_status);
   }
 }
 
 float DHT11::_getTemperature() {
-  if (_status != 0) return NAN;
-  return static_cast<float>(_data[2]);
+  return _status == Status::RECEIVED
+    ? static_cast<float>(_data[2])
+    : NAN;
 }
 
 float DHT11::_getHumidity() {
-  if (_status != 0) return NAN;
-  return static_cast<float>(_data[0]);
+  return _status == Status::RECEIVED
+    ? static_cast<float>(_data[0])
+    : NAN;
 }
 
 float DHT22::_getTemperature() {
-  if (_status != 0) return NAN;
+  if (_status != Status::RECEIVED) {
+    return NAN;
+  }
+
   float temp = (((_data[2] & 0x7F) << 8) | _data[3]) * 0.1;
   if (_data[2] & 0x80) {  // negative temperature
     temp = -temp;
   }
+
   return temp;
 }
 
 float DHT22::_getHumidity() {
-  if (_status != 0) return NAN;
-  return ((_data[0] << 8) | _data[1]) * 0.1;
+  return _status == Status::RECEIVED
+    ? (((_data[0] << 8) | _data[1]) * 0.1)
+    : NAN;
 }
