@@ -38,7 +38,7 @@ class DHT {
  public:
   enum class Status {
     NONE,
-    WAITING,
+    READY,
     REQUESTING,
     RECEIVING,
     RECEIVED,

@@ -92,6 +92,8 @@ bool DHT::setup(uint8_t pin) {
 
   pinMode(_pin, OUTPUT);
   digitalWrite(_pin, HIGH);
+
+  return true;
 }
 
 void DHT::onData(DHT::DataCallback callback) {
@@ -116,8 +118,8 @@ const char* DHT::statusToString(const Status status) {
       return "NONE";
       break;
 
-    case Status::WAITING:
-      return "WAITING";
+    case Status::READY:
+      return "READY";
       break;
 
     case Status::REQUESTING:
@@ -170,7 +172,7 @@ void DHT::_readSensor(DHT* instance) {
   while (1) {
     // reset
     memset(instance->_data, 0, sizeof(instance->_data));
-    instance->_status = Status::WAITING;
+    instance->_status = Status::READY;
 
     // block and wait for notification
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
