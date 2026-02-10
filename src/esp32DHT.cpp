@@ -60,12 +60,11 @@ void DHT::end() {
 
 bool DHT::setup(uint8_t pin) {
   _pin = pin;
-  rmt_rx_channel_config_t rx_conf = {
-    .gpio_num = static_cast<gpio_num_t>(_pin),
-    .clk_src = RMT_CLK_SRC_DEFAULT,
-    .resolution_hz = 1000000,
-    .mem_block_symbols = 128
-  };
+  rmt_rx_channel_config_t rx_conf{};
+  rx_conf.gpio_num = static_cast<gpio_num_t>(_pin);
+  rx_conf.clk_src = RMT_CLK_SRC_DEFAULT;
+  rx_conf.resolution_hz = 1000000;
+  rx_conf.mem_block_symbols = 128;
 
   if (rmt_new_rx_channel(&rx_conf, &_channel) != ESP_OK) {
     _status = Status::FAIL_ON_DRIVER;
@@ -187,10 +186,10 @@ void DHT::_readSensor(DHT* instance) {
     // set status
     instance->_status = Status::RECEIVING;
 
-    rmt_receive_config_t rx_config = {
-      .signal_range_min_ns = 3000,
-      .signal_range_max_ns = 1000000,
-    };
+    rmt_receive_config_t rx_config{};
+    rx_config.signal_range_min_ns = 3000;
+    rx_config.signal_range_max_ns = 1000000;
+
     rmt_receive(instance->_channel, instance->_raw, sizeof(instance->_raw), &rx_config);
 
     // blocks until data is available or timeouts after 1s
