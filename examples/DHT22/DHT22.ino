@@ -38,8 +38,8 @@ void readDHT() {
 }
 
 void setup() {
-  Serial.begin(74880);
-  sensor.setup(12); // pin 23 is DATA
+  Serial.begin(115200);
+  sensor.setup(12); // pin 12 is DATA
   sensor.onData([](float humidity, float temperature) {
     Serial.printf("[%lu] Temp: %g°C\nHumid: %g%%\n", millis(), temperature, humidity);
   });
