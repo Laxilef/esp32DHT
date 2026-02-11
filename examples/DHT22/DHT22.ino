@@ -29,30 +29,42 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <esp32DHT.h>
 
 Ticker ticker;
-DHT22 sensor;
-// DHT11 sensor;  // DHT11 also works!
+DHT sensor;
 DHT::Status prevStatus = DHT::Status::NONE;
 
 void readDHT() {
-  sensor.read();
+  sensor.poll();
 }
 
 void setup() {
   Serial.begin(115200);
-  sensor.setup(12); // pin 12 is DATA
+
+  // PIN 12 is DATA
+  sensor.setup(12, DHT::Type::DHT22);
+  // DHT11 also works:
+  // sensor.setup(12, DHT::Type::DHT11);
+
+  // register onData callback
   sensor.onData([](float humidity, float temperature) {
-    Serial.printf("[%lu] Temp: %g°C\nHumid: %g%%\n", millis(), temperature, humidity);
+    Serial.printf("[%lu][CALLBACK] Temperature: %.2f°C, Humidity: %.2f%%\n", millis(), temperature, humidity);
   });
+
+  // register onError callback
   sensor.onError([](DHT::Status status) {
-    Serial.printf("[%lu] Sensor error: %s\n", millis(), DHT::statusToString(status));
+    Serial.printf("[%lu][CALLBACK] Sensor error: %s\n", millis(), DHT::statusToString(status));
   });
-  ticker.attach(30, readDHT);
+
+  ticker.attach(10, readDHT);
 }
 
 void loop() {
-  auto currentStatus = sensor.getStatus();
-  if (currentStatus != prevStatus) {
-    Serial.printf("[%lu] Status '%s' => '%s'\n", millis(), DHT::statusToString(prevStatus), DHT::statusToString(currentStatus));
-    prevStatus = currentStatus;
+  auto status = sensor.getStatus();
+  if (status != prevStatus) {
+    Serial.printf("[%lu] Status '%s' => '%s'\n", millis(), DHT::statusToString(prevStatus), DHT::statusToString(status));
+    prevStatus = status;
+
+    if (status == DHT::Status::READED || status == DHT::Status::RECEIVED) {
+      Serial.printf("[%lu] T: %g, H: %g\n", millis(), sensor.getTemperature(), sensor.getHumidity());
+    }
   }
 }

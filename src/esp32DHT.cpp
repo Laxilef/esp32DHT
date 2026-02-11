@@ -22,23 +22,26 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 */
 
+#include <Arduino.h>
 #include "esp32DHT.hpp"  // NOLINT
 
 DHT::DHT() :
+  _gpio(GPIO_NUM_NC),
+  _type(DHT::Type::DHT22),
   _status(DHT::Status::NONE),
+  _lastReadTime(0),
   _data{0},
-  _pin(0),
-  _channel(nullptr),
   _onData(nullptr),
   _onError(nullptr),
+  _channel(nullptr),
   _task(nullptr),
   _queue(nullptr) {}
 
 DHT::~DHT() {
-  end();
+  reset();
 }
 
-void DHT::end() {
+void DHT::reset() {
   if (_channel != nullptr) {
     rmt_disable(_channel);
     rmt_del_channel(_channel);
@@ -55,45 +58,17 @@ void DHT::end() {
     _queue = nullptr;
   }
 
+  if (_gpio != GPIO_NUM_NC) {
+    gpio_set_level(_gpio, 1);
+    gpio_set_direction(_gpio, GPIO_MODE_INPUT);
+  }
+
+  _gpio = GPIO_NUM_NC;
+  _type = Type::DHT22;
   _status = Status::NONE;
-}
-
-bool DHT::setup(uint8_t pin) {
-  _pin = pin;
-  rmt_rx_channel_config_t rx_conf{};
-  rx_conf.gpio_num = static_cast<gpio_num_t>(_pin);
-  rx_conf.clk_src = RMT_CLK_SRC_DEFAULT;
-  rx_conf.resolution_hz = 1000000;
-  rx_conf.mem_block_symbols = 128;
-
-  if (rmt_new_rx_channel(&rx_conf, &_channel) != ESP_OK) {
-    _status = Status::FAIL_ON_DRIVER;
-    return false;
-  }
-
-  if (rmt_enable(_channel) != ESP_OK) {
-    rmt_del_channel(_channel);
-    _status = Status::FAIL_ON_DRIVER;
-    return false;
-  }
-
-  rmt_rx_event_callbacks_t cbs = {
-    .on_recv_done = _onRxDone
-  };
-  if (rmt_rx_register_event_callbacks(_channel, &cbs, this) != ESP_OK) {
-    rmt_disable(_channel);
-    rmt_del_channel(_channel);
-    _status = Status::FAIL_ON_DRIVER;
-    return false;
-  }
-  
-  _queue = xQueueCreate(1, sizeof(rmt_rx_done_event_data_t));
-  xTaskCreate((TaskFunction_t)&_readSensor, "esp32DHT", 3072, this, 5, &_task);
-
-  pinMode(_pin, OUTPUT);
-  digitalWrite(_pin, HIGH);
-
-  return true;
+  _lastReadTime = 0;
+  _onData = nullptr;
+  _onError = nullptr;
 }
 
 void DHT::onData(DHT::DataCallback callback) {
@@ -104,12 +79,142 @@ void DHT::onError(DHT::ErrorCallback callback) {
   _onError = callback;
 }
 
-void DHT::read() {
-  xTaskNotifyGive(_task);
+gpio_num_t DHT::getGpio() const {
+  return _gpio;
 }
 
 DHT::Status DHT::getStatus() const {
   return _status;
+}
+
+unsigned short DHT::getWakeupDelay() const {
+  if (_type == Type::DHT11) {
+    return 20;
+
+  } else if (_type == Type::DHT22) {
+    return 2;
+
+  } else {
+    return 0;
+  }
+}
+
+unsigned short DHT::getMinReadInterval() const {
+  if (_type == Type::DHT11) {
+    return 1000;
+
+  } else if (_type == Type::DHT22) {
+    return 2000;
+
+  } else {
+    return 0;
+  }
+}
+
+unsigned long DHT::getLastReadTime() const {
+  return _lastReadTime;
+}
+
+bool DHT::setup(gpio_num_t gpio, Type type) {
+  if (gpio == GPIO_NUM_NC) {
+    _status = Status::FAIL_ON_DRIVER;
+    return false;
+  }
+
+  rmt_rx_channel_config_t rxСonfig{};
+  rxСonfig.gpio_num = gpio;
+  rxСonfig.clk_src = RMT_CLK_SRC_DEFAULT;
+  rxСonfig.resolution_hz = 1000000;
+  rxСonfig.mem_block_symbols = 128;
+  //rxСonfig.flags.with_dma = false;
+  rxСonfig.flags.io_loop_back = true;
+
+  if (rmt_new_rx_channel(&rxСonfig, &_channel) != ESP_OK) {
+    _status = Status::FAIL_ON_DRIVER;
+    return false;
+  }
+
+  _queue = xQueueCreate(1, sizeof(rmt_rx_done_event_data_t));
+  rmt_rx_event_callbacks_t cbs = {
+    .on_recv_done = _onReceiveDone
+  };
+  if (rmt_rx_register_event_callbacks(_channel, &cbs, this) != ESP_OK || rmt_enable(_channel) != ESP_OK) {
+    vQueueDelete(_queue);
+    rmt_del_channel(_channel);
+    _queue = nullptr;
+    _status = Status::FAIL_ON_DRIVER;
+    return false;
+  }
+
+  gpio_pullup_dis(gpio);
+  gpio_pulldown_dis(gpio);
+  gpio_set_direction(gpio, GPIO_MODE_INPUT_OUTPUT);
+  gpio_set_intr_type(gpio, GPIO_INTR_DISABLE);
+  gpio_set_level(gpio, 1);
+
+  _gpio = gpio;
+  _type = type;
+  xTaskCreate((TaskFunction_t)&_read, "esp32DHT", 3072, this, 5, &_task);
+  _status = Status::INITIALIZED;
+
+  return true;
+}
+
+bool DHT::poll() {
+  // check interval
+  if ((millis() - _lastReadTime) <= getMinReadInterval()) {
+    return false;
+  }
+
+  // check status
+  if (_status == Status::NONE || _status == Status::FAIL_ON_DRIVER || 
+      _status == Status::REQUESTING || _status == Status::RECEIVING || _status == Status::RECEIVED) {
+    return false;
+  }
+
+  // set requesting status
+  _status = Status::REQUESTING;
+
+  return xTaskNotifyGive(_task) == pdPASS;
+}
+
+float DHT::getTemperature() const {
+  if (_status != Status::RECEIVED && _status != Status::READED) {
+    return NAN;
+  }
+
+  if (_type == Type::DHT11) {
+    return static_cast<float>(_data[2]);
+
+  } else if (_type == Type::DHT22) {
+    float value = (((_data[2] & 0x7F) << 8) | _data[3]) * 0.1f;
+
+    // check if negative temperature
+    if (_data[2] & 0x80) {
+      value = -value;
+    }
+
+    return value;
+
+  } else {
+    return NAN;
+  }
+}
+
+float DHT::getHumidity() const {
+  if (_status != Status::RECEIVED && _status != Status::READED) {
+    return NAN;
+  }
+
+  if (_type == Type::DHT11) {
+    return static_cast<float>(_data[0]);
+
+  } else if (_type == Type::DHT22) {
+    return ((_data[0] << 8) | _data[1]) * 0.1f;
+
+  } else {
+    return NAN;
+  }
 }
 
 const char* DHT::statusToString(const Status status) {
@@ -118,8 +223,8 @@ const char* DHT::statusToString(const Status status) {
       return "NONE";
       break;
 
-    case Status::READY:
-      return "READY";
+    case Status::INITIALIZED:
+      return "INITIALIZED";
       break;
 
     case Status::REQUESTING:
@@ -134,16 +239,24 @@ const char* DHT::statusToString(const Status status) {
       return "RECEIVED";
       break;
 
+    case Status::READED:
+      return "READED";
+      break;
+
+    case Status::FAIL_ON_DRIVER:
+      return "FAIL_ON_DRIVER";
+      break;
+
+    case Status::NACK:
+      return "NACK";
+      break;
+
     case Status::TIMEOUT:
       return "TIMEOUT";
       break;
 
     case Status::BAD_DATA:
       return "BAD_DATA";
-      break;
-
-    case Status::BAD_CHECKSUM:
-      return "BAD_CHECKSUM";
       break;
 
     case Status::UNDERFLOW_DATA:
@@ -154,12 +267,8 @@ const char* DHT::statusToString(const Status status) {
       return "OVERFLOW_DATA";
       break;
 
-    case Status::NACK:
-      return "NACK";
-      break;
-
-    case Status::FAIL_ON_DRIVER:
-      return "FAIL_ON_DRIVER";
+    case Status::BAD_CHECKSUM:
+      return "BAD_CHECKSUM";
       break;
 
     default:
@@ -168,129 +277,119 @@ const char* DHT::statusToString(const Status status) {
   }
 }
 
-void DHT::_readSensor(DHT* instance) {
-  while (1) {
-    // reset
-    memset(instance->_data, 0, sizeof(instance->_data));
-    instance->_status = Status::READY;
-
+void DHT::_read(DHT* instance) {
+  while (true) {
     // block and wait for notification
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-    // set status
-    instance->_status = Status::REQUESTING;
+    // reset data
+    memset(instance->_data, 0, sizeof(instance->_data));
 
-    // give start signal to sensor
-    digitalWrite(instance->_pin, LOW);
-    vTaskDelay(18 / portTICK_PERIOD_MS);
-    pinMode(instance->_pin, INPUT);
+    // start receive
+    rmt_symbol_word_t buffer[128];
+    rmt_receive_config_t receiveConfig{};
+    receiveConfig.signal_range_min_ns = 3000;
+    receiveConfig.signal_range_max_ns = 21000000;
+    rmt_receive(instance->_channel, buffer, sizeof(buffer), &receiveConfig);
 
-    // set status
+    // wakeup
+    gpio_set_level(instance->_gpio, 0);
+    vTaskDelay(pdMS_TO_TICKS(instance->getWakeupDelay()));
+    gpio_set_level(instance->_gpio, 1);
+
+    // set receiving status
     instance->_status = Status::RECEIVING;
-
-    rmt_receive_config_t rx_config{};
-    rx_config.signal_range_min_ns = 3000;
-    rx_config.signal_range_max_ns = 1000000;
-
-    rmt_receive(instance->_channel, instance->_raw, sizeof(instance->_raw), &rx_config);
 
     // blocks until data is available or timeouts after 1s
     rmt_rx_done_event_data_t eData = {};
-    if (xQueueReceive(instance->_queue, &eData, 1000 / portTICK_PERIOD_MS) == pdTRUE) {
+    if (xQueueReceive(instance->_queue, &eData, pdMS_TO_TICKS(1000)) == pdTRUE) {
       instance->_decode(eData.received_symbols, eData.num_symbols);
 
     } else {
       instance->_status = Status::TIMEOUT;
     }
 
-    pinMode(instance->_pin, OUTPUT);
-    digitalWrite(instance->_pin, HIGH);
+    gpio_set_level(instance->_gpio, 1);
 
     // return results
-    instance->_tryCallback();
+    if (instance->_status == Status::RECEIVED && instance->_onData) {
+      instance->_onData(instance->getHumidity(), instance->getTemperature());
+
+    } else if (instance->_status != Status::RECEIVED && instance->_onError) {
+      instance->_onError(instance->_status);
+    }
+
+    instance->_lastReadTime = millis();
+    instance->_status = Status::READED;
   }
 }
 
-bool IRAM_ATTR DHT::_onRxDone(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *eData, void *uCtx) {
+bool IRAM_ATTR DHT::_onReceiveDone(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *eData, void *uCtx) {
   BaseType_t wakeup = pdFALSE;
   DHT* instance = static_cast<DHT*>(uCtx);
-  xQueueSendFromISR(instance->_queue, eData, &wakeup);
+  if (instance->_queue != nullptr) {
+    xQueueSendFromISR(instance->_queue, eData, &wakeup);
+  }
+
   return (wakeup == pdTRUE);
 }
 
-void DHT::_decode(const rmt_symbol_word_t* data, const size_t numItems) {
-  uint8_t pulse = data[0].duration0 + data[0].duration1;
+void DHT::_decode(const rmt_symbol_word_t* symbols, const size_t numSymbols) {
+  /* Serial.printf("numSymbols: %zu\n", numSymbols);
+  for (size_t i = 0; i < std::min(static_cast<size_t>(10), numSymbols); ++i) {
+    Serial.printf(
+      "Symbol %zu: level0=%u dur0=%u, level1=%u dur1=%u\n", i,
+        symbols[i].level0,
+        symbols[i].duration0,
+        symbols[i].level1,
+        symbols[i].duration1
+    );
+  } */
 
-  if (numItems < 41) {
+  // Check length
+  if (numSymbols < 42) {
     _status = Status::UNDERFLOW_DATA;
+    return;
 
-  } else if (numItems > 42) {
+  } else if (numSymbols > 43) {
     _status = Status::OVERFLOW_DATA;
+    return;
+  }
 
-  } else if (pulse < 130 || pulse > 180) {
+  // Ack
+  auto ackDuration = symbols[1].duration0 + symbols[1].duration1;
+  if (ackDuration < 130 || ackDuration > 180) {
     _status = Status::NACK;
+    return;
+  }
 
-  } else {
-    for (uint8_t i = 1; i < 41; ++i) {  // don't include tail >40
-      pulse = data[i].duration0 + data[i].duration1;
-
-      if (pulse > 55 && pulse < 145) {
-        _data[(i - 1) / 8] <<= 1;  // shift left
-        if (pulse > 110) {
-          _data[(i - 1) / 8] |= 1;
-        }
-
-      } else {
-        _status = Status::BAD_DATA;
-        return;
-      }
+  // Data
+  for (size_t i = 2; i < 42; ++i) {
+    auto lowDuration = symbols[i].duration0;
+    if (lowDuration < 40 || lowDuration > 60) {
+      _status = Status::BAD_DATA;
+      return;
     }
 
-    if (_data[4] == ((_data[0] + _data[1] + _data[2] + _data[3]) & 0xFF)) {
-      _status = Status::RECEIVED;
+    auto highDuration = symbols[i].duration1;
+    if (highDuration < 15 || highDuration > 90) {
+      _status = Status::BAD_DATA;
+      return;
+    }
 
-    } else {
-      _status = Status::BAD_CHECKSUM;
+    size_t byteIndex = (i - 2) / 8;
+    size_t bitIndex = 7 - ((i - 2) % 8); // MSB first
+    if (highDuration > 40) {
+      _data[byteIndex] |= (1 << bitIndex);
     }
   }
-}
 
-void DHT::_tryCallback() {
-  if (_status == Status::RECEIVED && _onData) {
-    _onData(_getHumidity(), _getTemperature());
-
-  } else if (_status != Status::RECEIVED && _onError) {
-    _onError(_status);
-  }
-}
-
-float DHT11::_getTemperature() {
-  return _status == Status::RECEIVED
-    ? static_cast<float>(_data[2])
-    : NAN;
-}
-
-float DHT11::_getHumidity() {
-  return _status == Status::RECEIVED
-    ? static_cast<float>(_data[0])
-    : NAN;
-}
-
-float DHT22::_getTemperature() {
-  if (_status != Status::RECEIVED) {
-    return NAN;
+  // Checksum
+  uint8_t checksum = _data[0] + _data[1] + _data[2] + _data[3];
+  if (checksum != _data[4]) {
+    _status = Status::BAD_CHECKSUM;
+    return;
   }
 
-  float temp = (((_data[2] & 0x7F) << 8) | _data[3]) * 0.1;
-  if (_data[2] & 0x80) {  // negative temperature
-    temp = -temp;
-  }
-
-  return temp;
-}
-
-float DHT22::_getHumidity() {
-  return _status == Status::RECEIVED
-    ? (((_data[0] << 8) | _data[1]) * 0.1)
-    : NAN;
+  _status = Status::RECEIVED;
 }

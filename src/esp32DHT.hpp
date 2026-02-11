@@ -38,61 +38,57 @@ class DHT {
  public:
   enum class Status {
     NONE,
-    READY,
+    INITIALIZED,
     REQUESTING,
     RECEIVING,
     RECEIVED,
+    READED,
+
+    FAIL_ON_DRIVER,
+    NACK,
     TIMEOUT,
     BAD_DATA,
-    BAD_CHECKSUM,
     UNDERFLOW_DATA,
     OVERFLOW_DATA,
-    NACK,
-    FAIL_ON_DRIVER
+    BAD_CHECKSUM
+  };
+  enum class Type {
+    DHT11,
+    DHT22
   };
   typedef std::function<void(float humidity, float temperature)> DataCallback;
   typedef std::function<void(Status status)> ErrorCallback;
 
   DHT();
   ~DHT();
-  void end();
-  bool setup(uint8_t pin);
+  void reset();
   void onData(DataCallback callback);
   void onError(ErrorCallback callback);
-  void read();
+  gpio_num_t getGpio() const;
   Status getStatus() const;
+  virtual unsigned short getWakeupDelay() const;
+  virtual unsigned short getMinReadInterval() const;
+  unsigned long getLastReadTime() const;
+  bool setup(gpio_num_t gpio, Type type);
+  bool setup(uint8_t pin, Type type) { return setup(static_cast<gpio_num_t>(pin), type); }
+  bool poll();
+  virtual float getTemperature() const;
+  virtual float getHumidity() const;
   static const char* statusToString(const Status status);
 
  protected:
+  gpio_num_t _gpio;
+  Type _type;
   Status _status;
+  unsigned long _lastReadTime;
   uint8_t _data[5];
-
- private:
-  static void _readSensor(DHT* instance);
-  static bool _onRxDone(rmt_channel_handle_t, const rmt_rx_done_event_data_t*, void*);
-  void _decode(const rmt_symbol_word_t* data, const size_t numItems);
-  void _tryCallback();
-  virtual float _getTemperature() = 0;
-  virtual float _getHumidity() = 0;
-
- private:
-  uint8_t _pin;
-  rmt_channel_handle_t _channel;
   DataCallback _onData;
   ErrorCallback _onError;
+  rmt_channel_handle_t _channel;
   TaskHandle_t _task;
-  rmt_symbol_word_t _raw[128];
   QueueHandle_t _queue;
-};
 
-class DHT11 : public DHT {
- private:
-  float _getTemperature() override;
-  float _getHumidity() override;
-};
-
-class DHT22 : public DHT {
- private:
-  float _getTemperature() override;
-  float _getHumidity() override;
+  static void _read(DHT* instance);
+  static bool _onReceiveDone(rmt_channel_handle_t, const rmt_rx_done_event_data_t*, void*);
+  void _decode(const rmt_symbol_word_t* data, const size_t numItems);
 };
