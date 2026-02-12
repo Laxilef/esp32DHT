@@ -154,7 +154,7 @@ bool DHT::setup(gpio_num_t gpio, Type type) {
 
   _gpio = gpio;
   _type = type;
-  xTaskCreate((TaskFunction_t)&_read, "esp32DHT", 3072, this, 5, &_task);
+  xTaskCreate((TaskFunction_t)&_read, DHT_TASK_NAME, DHT_TASK_STACK_SIZE, this, DHT_TASK_PRIORITY, &_task);
   _status = Status::INITIALIZED;
 
   return true;

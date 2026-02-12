@@ -24,6 +24,18 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #pragma once
 
+#ifndef DHT_TASK_NAME
+  #define DHT_TASK_NAME "esp32DHT"
+#endif
+
+#ifndef DHT_TASK_STACK_SIZE
+  #define DHT_TASK_STACK_SIZE 2048
+#endif
+
+#ifndef DHT_TASK_PRIORITY
+  #define DHT_TASK_PRIORITY 5
+#endif
+
 extern "C" {
   #include <freertos/FreeRTOS.h>
   #include <freertos/task.h>
