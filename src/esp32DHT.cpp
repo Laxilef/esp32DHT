@@ -125,8 +125,8 @@ bool DHT::setup(gpio_num_t gpio, Type type) {
   rxСonfig.gpio_num = gpio;
   rxСonfig.clk_src = RMT_CLK_SRC_DEFAULT;
   rxСonfig.resolution_hz = 1000000;
-  rxСonfig.mem_block_symbols = 128;
-  //rxСonfig.flags.with_dma = false;
+  rxСonfig.mem_block_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL;
+  rxСonfig.flags.with_dma = false;
   rxСonfig.flags.io_loop_back = true;
 
   if (rmt_new_rx_channel(&rxСonfig, &_channel) != ESP_OK) {
