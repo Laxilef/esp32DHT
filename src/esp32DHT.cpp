@@ -127,7 +127,9 @@ bool DHT::setup(gpio_num_t gpio, Type type) {
   rxСonfig.resolution_hz = 1000000;
   rxСonfig.mem_block_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL;
   rxСonfig.flags.with_dma = false;
+#if ESP_IDF_VERSION_MAJOR < 6
   rxСonfig.flags.io_loop_back = true;
+#endif
 
   if (rmt_new_rx_channel(&rxСonfig, &_channel) != ESP_OK) {
     _status = Status::FAIL_ON_DRIVER;
