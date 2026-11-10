@@ -44,6 +44,7 @@ extern "C" {
   #include <driver/rmt_rx.h>
   #include <esp_timer.h>
 }
+#include <atomic>
 #include <functional>
 
 class DHT {
@@ -84,6 +85,7 @@ class DHT {
   unsigned long getLastReadTime() const;
   bool setup(gpio_num_t gpio, Type type);
   bool setup(uint8_t pin, Type type) { return setup(static_cast<gpio_num_t>(pin), type); }
+  bool isPolling() const;
   bool poll();
   virtual float getTemperature() const;
   virtual float getHumidity() const;
@@ -92,8 +94,9 @@ class DHT {
  protected:
   gpio_num_t _gpio;
   Type _type;
-  Status _status;
-  unsigned long _lastReadTime;
+  std::atomic<Status> _status;
+  std::atomic<bool> _polling{false};
+  std::atomic<unsigned long> _lastReadTime;
   uint8_t _data[5];
   DataCallback _onData;
   ErrorCallback _onError;
