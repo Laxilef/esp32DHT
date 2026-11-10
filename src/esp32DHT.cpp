@@ -83,6 +83,10 @@ gpio_num_t DHT::getGpio() const {
   return _gpio;
 }
 
+DHT::Type DHT::getType() const {
+  return _type;
+}
+
 DHT::Status DHT::getStatus() const {
   return _status;
 }

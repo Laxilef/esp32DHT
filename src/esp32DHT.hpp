@@ -77,6 +77,7 @@ class DHT {
   void onData(DataCallback callback);
   void onError(ErrorCallback callback);
   gpio_num_t getGpio() const;
+  Type getType() const;
   Status getStatus() const;
   virtual unsigned short getWakeupDelay() const;
   virtual unsigned short getMinReadInterval() const;
